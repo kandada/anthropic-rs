@@ -4,6 +4,7 @@
 
 # anthropic-client-rs
 
+[![Crates.io](https://img.shields.io/crates/v/anthropic-client-rs.svg)](https://crates.io/crates/anthropic-client-rs)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 全功能 Rust Anthropic API 客户端。兼容 Claude、MiniMax、DeepSeek-anthropic 等**任何 Anthropic 兼容的 API 提供商**。

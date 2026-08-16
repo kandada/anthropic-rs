@@ -1,6 +1,6 @@
 [package]
 name = "anthropic-client-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.70"
 description = "Full-featured Rust client for the Anthropic Messages API — streaming SSE, tool use, extended thinking, prompt caching, auto-retry, token counting. Compatible with Claude, MiniMax, DeepSeek."

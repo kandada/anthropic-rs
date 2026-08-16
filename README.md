@@ -4,6 +4,7 @@
 
 # anthropic-client-rs
 
+[![Crates.io](https://img.shields.io/crates/v/anthropic-client-rs.svg)](https://crates.io/crates/anthropic-client-rs)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 A full-featured Rust client for the Anthropic Messages API. Compatible with Claude, MiniMax, DeepSeek-anthropic, and **any Anthropic-compatible provider**.
