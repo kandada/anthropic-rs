@@ -1,16 +1,16 @@
 [package]
-name = "anthropic-rs"
+name = "anthropic-client-rs"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.70"
 description = "Full-featured Rust client for the Anthropic Messages API — streaming SSE, tool use, extended thinking, prompt caching, auto-retry, token counting. Compatible with Claude, MiniMax, DeepSeek."
 license = "Apache-2.0"
-repository = "https://github.com/xiefujin/anthropic-rs"
-homepage = "https://github.com/xiefujin/anthropic-rs"
-documentation = "https://docs.rs/anthropic-rs"
+repository = "https://github.com/kandada/anthropic-rs"
+homepage = "https://github.com/kandada/anthropic-rs"
+documentation = "https://docs.rs/anthropic-client-rs"
 readme = "README.md"
 authors = ["xiefujin <490021684@qq.com>"]
-keywords = ["anthropic", "claude", "llm", "chat", "api", "sse", "async", "tool-use", "prompt-caching", "thinking"]
+keywords = ["anthropic", "claude", "llm", "chat", "ai"]
 categories = ["api-bindings", "web-programming::http-client", "asynchronous"]
 
 [workspace]

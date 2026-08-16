@@ -1,7 +1,7 @@
 // Copyright (c) 2025 xiefujin <490021684@qq.com>
 // Licensed under Apache-2.0, see LICENSE file for full license terms.
 
-//! # anthropic-rs
+//! # anthropic-client-rs
 //!
 //! A Rust client for the Anthropic Messages API — streaming SSE, tool use,
 //! extended thinking, and prompt caching. Compatible with Claude, MiniMax,

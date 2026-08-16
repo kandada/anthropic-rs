@@ -2,7 +2,7 @@
 <!-- Licensed under Apache-2.0, see LICENSE file for full license terms. -->
 
 
-# anthropic-rs
+# anthropic-client-rs
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
@@ -27,10 +27,10 @@
 
 ```toml
 [dependencies]
-anthropic-rs = "0.1"
+anthropic-client-rs = "0.1"
 
 # 异步支持
-# anthropic-rs = { version = "0.1", features = ["async"] }
+# anthropic-client-rs = { version = "0.1", features = ["async"] }
 ```
 
 ## 快速开始
@@ -38,7 +38,7 @@ anthropic-rs = "0.1"
 ### 同步
 
 ```rust
-use anthropic_rs::{AnthropicClient, ChatMessage};
+use anthropic_client_rs::{AnthropicClient, ChatMessage};
 
 let client = AnthropicClient::new("sk-ant-xxx", "claude-sonnet-4-20250514");
 let resp = client.messages_create(
@@ -51,7 +51,7 @@ println!("{}", resp.text);
 ### 异步
 
 ```rust
-use anthropic_rs::{AnthropicAsyncClient, ChatMessage};
+use anthropic_client_rs::{AnthropicAsyncClient, ChatMessage};
 
 let client = AnthropicAsyncClient::new("sk-ant-xxx", "claude-sonnet-4-20250514");
 let resp = client.messages_create(&[ChatMessage::user("你好")], Some("简洁回答"), None, 1024).await.unwrap();
@@ -71,7 +71,7 @@ client.messages_stream(
 ## 工具调用
 
 ```rust
-use anthropic_rs::Tool;
+use anthropic_client_rs::Tool;
 use serde_json::json;
 
 let tools = &[Tool::new("get_weather", "查询天气",
@@ -91,7 +91,7 @@ for tc in &resp.tool_calls {
 ## 请求构建器
 
 ```rust
-use anthropic_rs::{MessageRequest, ThinkingConfig, Metadata};
+use anthropic_client_rs::{MessageRequest, ThinkingConfig, Metadata};
 
 let req = MessageRequest::new("claude-sonnet-4-20250514", messages, 2048)
     .system("你是帮助性助手。")
@@ -108,7 +108,7 @@ let resp = client.post_json(body).unwrap();
 ## 提示缓存
 
 ```rust
-use anthropic_rs::CacheConfig;
+use anthropic_client_rs::CacheConfig;
 
 let config = CacheConfig::standard();  // 缓存 system + 最后工具 + 最后 2 条消息
 let mut body = req.build_body();
@@ -119,7 +119,7 @@ config.apply(&mut body);
 ## 自动重试
 
 ```rust
-use anthropic_rs::{RetryConfig, retry};
+use anthropic_client_rs::{RetryConfig, retry};
 let config = RetryConfig { max_retries: 3, ..Default::default() };
 let result = retry_sync(|| client.messages_create(&[...], None, None, 1024), &config, |e| e.is_retryable());
 ```
@@ -127,7 +127,7 @@ let result = retry_sync(|| client.messages_create(&[...], None, None, 1024), &co
 ## Token 计数
 
 ```rust
-use anthropic_rs::tokens;
+use anthropic_client_rs::tokens;
 let n = tokens::count_message_tokens(&msg);
 let total = tokens::count_messages_tokens(&messages);
 ```
@@ -135,7 +135,7 @@ let total = tokens::count_messages_tokens(&messages);
 ## 视觉识别
 
 ```rust
-use anthropic_rs::{ChatMessage, ContentBlock, ImageSource};
+use anthropic_client_rs::{ChatMessage, ContentBlock, ImageSource};
 
 let msg = ChatMessage::user_with_blocks(vec![
     ContentBlock::Image {
@@ -165,7 +165,7 @@ let client = AnthropicClient::with_base_url("sk-xxx", "deepseek-chat", "https://
 ## 错误处理
 
 ```rust
-use anthropic_rs::AnthropicError;
+use anthropic_client_rs::AnthropicError;
 
 match client.messages_create(&[...], None, None, 1024) {
     Ok(resp) => println!("{}", resp.text),

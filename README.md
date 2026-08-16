@@ -2,7 +2,7 @@
 <!-- Licensed under Apache-2.0, see LICENSE file for full license terms. -->
 
 
-# anthropic-rs
+# anthropic-client-rs
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
@@ -27,10 +27,10 @@ A full-featured Rust client for the Anthropic Messages API. Compatible with Clau
 
 ```toml
 [dependencies]
-anthropic-rs = "0.1"
+anthropic-client-rs = "0.1"
 
 # With async support
-# anthropic-rs = { version = "0.1", features = ["async"] }
+# anthropic-client-rs = { version = "0.1", features = ["async"] }
 ```
 
 ## Quick Start
@@ -38,7 +38,7 @@ anthropic-rs = "0.1"
 ### Sync
 
 ```rust
-use anthropic_rs::{AnthropicClient, ChatMessage};
+use anthropic_client_rs::{AnthropicClient, ChatMessage};
 
 let client = AnthropicClient::new("sk-ant-xxx", "claude-sonnet-4-20250514");
 let resp = client.messages_create(
@@ -51,7 +51,7 @@ println!("{}", resp.text);
 ### Async
 
 ```rust
-use anthropic_rs::{AnthropicAsyncClient, ChatMessage};
+use anthropic_client_rs::{AnthropicAsyncClient, ChatMessage};
 
 let client = AnthropicAsyncClient::new("sk-ant-xxx", "claude-sonnet-4-20250514");
 let resp = client.messages_create(&[ChatMessage::user("Hi")], Some("Be brief"), None, 1024).await.unwrap();
@@ -73,7 +73,7 @@ client.messages_stream(
 ## Tool Use
 
 ```rust
-use anthropic_rs::{Tool};
+use anthropic_client_rs::{Tool};
 use serde_json::json;
 
 let tools = &[Tool::new("get_weather", "Get weather",
@@ -93,7 +93,7 @@ for tc in &resp.tool_calls {
 ## Request Builder (Full API)
 
 ```rust
-use anthropic_rs::{MessageRequest, ThinkingConfig, Metadata};
+use anthropic_client_rs::{MessageRequest, ThinkingConfig, Metadata};
 
 let req = MessageRequest::new("claude-sonnet-4-20250514", messages, 2048)
     .system("You are helpful.")
@@ -112,7 +112,7 @@ let resp = client.post_json(body).unwrap();
 ## Prompt Caching
 
 ```rust
-use anthropic_rs::CacheConfig;
+use anthropic_client_rs::CacheConfig;
 
 let config = CacheConfig::standard();  // cache system + last tool + last 2 messages
 let mut body = req.build_body();
@@ -123,7 +123,7 @@ config.apply(&mut body);
 ## Auto-Retry
 
 ```rust
-use anthropic_rs::{RetryConfig, retry};
+use anthropic_client_rs::{RetryConfig, retry};
 
 let config = RetryConfig { max_retries: 3, ..Default::default() };
 let result = retry_sync(
@@ -136,7 +136,7 @@ let result = retry_sync(
 ## Token Counting
 
 ```rust
-use anthropic_rs::tokens;
+use anthropic_client_rs::tokens;
 let n = tokens::count_message_tokens(&msg);
 let total = tokens::count_messages_tokens(&messages);
 let sys = tokens::count_system_tokens("You are helpful.");
@@ -145,7 +145,7 @@ let sys = tokens::count_system_tokens("You are helpful.");
 ## Vision
 
 ```rust
-use anthropic_rs::{ChatMessage, ContentBlock, ImageSource};
+use anthropic_client_rs::{ChatMessage, ContentBlock, ImageSource};
 
 let msg = ChatMessage::user_with_blocks(vec![
     ContentBlock::Image {
@@ -198,7 +198,7 @@ let client = AnthropicClient::with_base_url("sk-xxx", "deepseek-chat", "https://
 ## Error Handling
 
 ```rust
-use anthropic_rs::AnthropicError;
+use anthropic_client_rs::AnthropicError;
 
 match client.messages_create(&[...], None, None, 1024) {
     Ok(resp) => println!("{}", resp.text),
