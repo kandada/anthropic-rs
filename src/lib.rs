@@ -24,12 +24,12 @@
 //! ## Quick start
 //!
 //! ```rust,no_run
-//! use anthropic_rs::{AnthropicClient, ChatMessage};
+//! use anthropic_client_rs::{AnthropicClient, ChatMessage};
 //!
 //! let client = AnthropicClient::new("sk-ant-xxx", "claude-sonnet-4-20250514");
 //! let resp = client.messages_create(
 //!     &[ChatMessage::user("Hello!")],
-//!     Some("You are helpful."), None, 1024,
+//!     Some("You are helpful."), None, 1024, None,
 //! ).unwrap();
 //! println!("{}", resp.text);
 //! ```
@@ -51,17 +51,18 @@ pub mod async_sse;
 #[cfg(feature = "async")]
 mod async_client;
 #[cfg(feature = "async")]
-mod async_messages;
+pub mod async_messages;
 
 pub use client::AnthropicClient;
 #[cfg(feature = "async")]
 pub use async_client::AnthropicAsyncClient;
-pub use error::{AnthropicError, Result};
+pub use error::{AnthropicError, ApiError, Result};
 pub use types::{
-    ChatMessage, ContentBlock, ImageSource, LlmResponse, MessageResponse,
-    SimplifiedToolCall, StreamEvent, Tool, ToolCall, ToolChoice, Usage,
+    ChatMessage, ContentBlock, CountTokensResponse, DocumentSource, ImageSource, LlmResponse,
+    MessageResponse, OutputTokensDetails, ServerToolUse, SimplifiedToolCall, StreamEvent, Tool,
+    ToolCall, ToolChoice, Usage,
 };
-pub use request::{MessageRequest, ThinkingConfig, Metadata};
+pub use request::{MessageRequest, ThinkingConfig, ThinkingDisplay, Metadata};
 pub use retry::RetryConfig;
 pub use cache::CacheConfig;
-pub use messages::parse_anthropic_stream;
+pub use messages::{parse_anthropic_stream, StreamEventStream};

@@ -122,6 +122,12 @@ pub enum ContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
     },
+    #[serde(rename = "server_tool_use")]
+    ServerToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
     #[serde(rename = "thinking")]
     Thinking {
         thinking: String,
@@ -276,9 +282,46 @@ pub struct Usage {
     pub cache_creation_input_tokens: Option<i64>,
     #[serde(default)]
     pub cache_read_input_tokens: Option<i64>,
+    /// Breakdown of output tokens by category (e.g. reasoning).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub output_tokens_details: Option<OutputTokensDetails>,
+    /// Server-side tool usage (code execution tool).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub server_tool_use: Option<ServerToolUse>,
 }
 
-// ── Streaming event types ───────────────────────────────────────────────────
+/// Breakdown of output tokens by category. `output_tokens` remains the
+/// inclusive, authoritative total used for billing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputTokensDetails {
+    #[serde(default)]
+    pub reasoning_tokens: Option<i64>,
+    #[serde(default)]
+    pub accepted_prediction_tokens: Option<i64>,
+    #[serde(default)]
+    pub rejected_prediction_tokens: Option<i64>,
+}
+
+/// Server-side tool usage counts (e.g. the code execution tool).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerToolUse {
+    #[serde(default)]
+    pub tool_use_count: Option<i64>,
+    #[serde(default)]
+    pub input_tokens: Option<i64>,
+    #[serde(default)]
+    pub cache_creation_input_tokens: Option<i64>,
+    #[serde(default)]
+    pub cache_read_input_tokens: Option<i64>,
+}
+
+/// Response from the `messages/count_tokens` endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CountTokensResponse {
+    pub input_tokens: i64,
+}
+
+/// Streaming event types ───────────────────────────────────────────────────
 
 /// An Anthropic SSE streaming event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -317,12 +360,22 @@ pub struct StreamDelta {
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
+    /// Carried by the `signature_delta` event that closes a thinking block.
+    /// Required to pass the thinking block back in multi-turn conversations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub partial_json: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_sequence: Option<String>,
+    /// Raw data for `redacted_thinking` blocks (opaque, encrypted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    /// Container info for the code execution (server) tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<Value>,
 }
 
 /// An in-stream error.
@@ -343,6 +396,14 @@ pub struct LlmResponse {
     pub reasoning_content: Option<String>,
     pub finish_reason: Option<String>,
     pub usage: Option<Usage>,
+    /// Ordered content blocks in their original stream order (text /
+    /// thinking / redacted_thinking / tool_use).
+    ///
+    /// Thinking blocks carry their `signature`, and `redacted_thinking`
+    /// blocks carry their opaque data, so a multi-turn conversation can
+    /// pass this vector straight back into `ChatMessage::user_with_blocks`
+    /// / assistant message `content_blocks` as Anthropic requires.
+    pub content_blocks: Vec<ContentBlock>,
 }
 
 impl LlmResponse {

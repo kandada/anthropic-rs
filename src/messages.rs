@@ -11,10 +11,41 @@ use serde_json::{json, Value};
 
 use crate::client::AnthropicClient;
 use crate::error::{AnthropicError, Result};
+use crate::request::{MessageRequest, ThinkingConfig};
 use crate::sse::SseReader;
 use crate::types::{
-    ChatMessage, LlmResponse, SimplifiedToolCall, Tool,
+    ChatMessage, ContentBlock, CountTokensResponse, LlmResponse, SimplifiedToolCall, StreamEvent,
+    Tool, Usage,
 };
+
+/// Iterator over raw, typed [`StreamEvent`]s from a streamed response.
+///
+/// Stops at `data: [DONE]` / EOF. Convenience counterpart to the
+/// callback-based [`AnthropicClient::messages_stream`].
+pub struct StreamEventStream<R: Read> {
+    sse: SseReader<R>,
+}
+
+impl<R: Read> StreamEventStream<R> {
+    pub fn new(reader: R) -> Self {
+        StreamEventStream { sse: SseReader::new(reader) }
+    }
+}
+
+impl<R: Read> Iterator for StreamEventStream<R> {
+    type Item = std::result::Result<StreamEvent, AnthropicError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.sse.next_data() {
+            Ok(Some(payload)) => Some(match serde_json::from_str(&payload) {
+                Ok(ev) => Ok(ev),
+                Err(e) => Err(AnthropicError::Json(e.to_string())),
+            }),
+            Ok(None) => None,
+            Err(e) => Some(Err(AnthropicError::Network(format!("SSE read error: {e}")))),
+        }
+    }
+}
 
 /// Accumulator for one streamed content block.
 #[derive(Default, Clone)]
@@ -23,6 +54,9 @@ struct BlockAcc {
     id: String,
     name: String,
     text: String,
+    thinking: String,
+    signature: String,
+    data: String,
     partial_json: String,
 }
 
@@ -30,17 +64,28 @@ impl AnthropicClient {
     // ── Non-streaming messages ─────────────────────────────────────────────
 
     /// Create a message (non-streaming).
+    ///
+    /// `thinking` enables extended thinking (see [`ThinkingConfig`]).
     pub fn messages_create(
         &self,
         messages: &[ChatMessage],
         system: Option<&str>,
         tools: Option<&[Tool]>,
         max_tokens: u64,
+        thinking: Option<&ThinkingConfig>,
     ) -> Result<LlmResponse> {
-        let body = self.build_message_body(messages, system, tools, max_tokens, false);
+        let body = crate::api_common::build_message_body(
+            self.model(),
+            messages,
+            system,
+            tools,
+            max_tokens,
+            false,
+            thinking,
+        );
         let resp = self.post_json(body)?;
         let raw: Value = resp.into_json()?;
-        Ok(self.assemble_message_response(&raw))
+        Ok(crate::api_common::assemble_message_response(&raw))
     }
 
     /// Create a message and return the raw JSON.
@@ -50,10 +95,54 @@ impl AnthropicClient {
         system: Option<&str>,
         tools: Option<&[Tool]>,
         max_tokens: u64,
+        thinking: Option<&ThinkingConfig>,
     ) -> Result<Value> {
-        let body = self.build_message_body(messages, system, tools, max_tokens, false);
+        let body = crate::api_common::build_message_body(
+            self.model(),
+            messages,
+            system,
+            tools,
+            max_tokens,
+            false,
+            thinking,
+        );
         let resp = self.post_json(body)?;
         Ok(resp.into_json()?)
+    }
+
+    /// Count input tokens for a set of messages via the official
+    /// `messages/count_tokens` endpoint.
+    pub fn count_tokens(
+        &self,
+        messages: &[ChatMessage],
+        system: Option<&str>,
+        tools: Option<&[Tool]>,
+    ) -> Result<CountTokensResponse> {
+        let body = crate::api_common::build_count_tokens_body(self.model(), messages, system, tools);
+        let resp = self.post_json_path("v1/messages/count_tokens", body)?;
+        Ok(resp.into_json()?)
+    }
+
+    /// Stream and return raw typed [`StreamEvent`]s.
+    pub fn messages_stream_events(
+        &self,
+        messages: &[ChatMessage],
+        system: Option<&str>,
+        tools: Option<&[Tool]>,
+        max_tokens: u64,
+        thinking: Option<&ThinkingConfig>,
+    ) -> Result<StreamEventStream<Box<dyn Read>>> {
+        let body = crate::api_common::build_message_body(
+            self.model(),
+            messages,
+            system,
+            tools,
+            max_tokens,
+            true,
+            thinking,
+        );
+        let reader = self.post_stream(body)?;
+        Ok(StreamEventStream::new(Box::new(reader) as Box<dyn Read>))
     }
 
     // ── Streaming messages (callback-based) ────────────────────────────────
@@ -62,205 +151,103 @@ impl AnthropicClient {
     ///
     /// `on_delta` is called for each text/reasoning token.
     /// `on_tool_call` is called when a tool call is completed.
+    #[allow(clippy::too_many_arguments)]
     pub fn messages_stream(
         &self,
         messages: &[ChatMessage],
         system: Option<&str>,
         tools: Option<&[Tool]>,
         max_tokens: u64,
+        thinking: Option<&ThinkingConfig>,
         on_delta: impl FnMut(&str),
         on_tool_call: impl FnMut(&str, &str),
     ) -> Result<LlmResponse> {
         let cancel = AtomicBool::new(false);
-        let body = self.build_message_body(messages, system, tools, max_tokens, true);
+        let body = crate::api_common::build_message_body(
+            self.model(),
+            messages,
+            system,
+            tools,
+            max_tokens,
+            true,
+            thinking,
+        );
         let reader = self.post_stream(body)?;
         parse_anthropic_stream(reader, on_delta, on_tool_call, &cancel)
     }
 
     /// Stream a message with cancellation support.
+    #[allow(clippy::too_many_arguments)]
     pub fn messages_stream_cancellable(
         &self,
         messages: &[ChatMessage],
         system: Option<&str>,
         tools: Option<&[Tool]>,
         max_tokens: u64,
+        thinking: Option<&ThinkingConfig>,
         on_delta: impl FnMut(&str),
         on_tool_call: impl FnMut(&str, &str),
         cancel: &AtomicBool,
     ) -> Result<LlmResponse> {
-        let body = self.build_message_body(messages, system, tools, max_tokens, true);
+        let body = crate::api_common::build_message_body(
+            self.model(),
+            messages,
+            system,
+            tools,
+            max_tokens,
+            true,
+            thinking,
+        );
         let reader = self.post_stream(body)?;
         parse_anthropic_stream(reader, on_delta, on_tool_call, cancel)
     }
 
-    // ── Internal helpers ───────────────────────────────────────────────────
+    // ── Full request-builder API ───────────────────────────────────────────
 
-    fn build_message_body(
+    /// Send a [`MessageRequest`] (non-streaming).
+    ///
+    /// Unlike the convenience methods this exposes every Messages API
+    /// parameter (temperature, top_p, top_k, stop_sequences, thinking,
+    /// metadata, tool_choice, ...).
+    pub fn messages_send(&self, request: &MessageRequest) -> Result<LlmResponse> {
+        let mut body = request.build_body();
+        body["stream"] = json!(false);
+        let resp = self.post_json(body)?;
+        let raw: Value = resp.into_json()?;
+        Ok(crate::api_common::assemble_message_response(&raw))
+    }
+
+    /// Send a [`MessageRequest`] with streaming.
+    pub fn messages_send_stream(
         &self,
-        messages: &[ChatMessage],
-        system: Option<&str>,
-        tools: Option<&[Tool]>,
-        max_tokens: u64,
-        stream: bool,
-    ) -> Value {
-        let msgs = Self::build_anthropic_messages(messages);
-        let mut body = json!({
-            "model": self.model(),
-            "max_tokens": max_tokens,
-            "messages": msgs,
-            "stream": stream,
-        });
+        request: &MessageRequest,
+        on_delta: impl FnMut(&str),
+        on_tool_call: impl FnMut(&str, &str),
+    ) -> Result<LlmResponse> {
+        let cancel = AtomicBool::new(false);
+        let mut body = request.build_body();
+        body["stream"] = json!(true);
+        let reader = self.post_stream(body)?;
+        parse_anthropic_stream(reader, on_delta, on_tool_call, &cancel)
+    }
 
-        if let Some(sys) = system {
-            if !sys.is_empty() {
-                body["system"] = Value::String(sys.to_string());
-            }
-        }
-
-        if let Some(tools) = tools {
-            if !tools.is_empty() {
-                let arr: Vec<Value> = tools
-                    .iter()
-                    .map(|t| serde_json::to_value(t).unwrap_or_default())
-                    .collect();
-                body["tools"] = Value::Array(arr);
-            }
-        }
-
-        body
+    /// Send a [`MessageRequest`] with streaming + cancellation.
+    pub fn messages_send_stream_cancellable(
+        &self,
+        request: &MessageRequest,
+        on_delta: impl FnMut(&str),
+        on_tool_call: impl FnMut(&str, &str),
+        cancel: &AtomicBool,
+    ) -> Result<LlmResponse> {
+        let mut body = request.build_body();
+        body["stream"] = json!(true);
+        let reader = self.post_stream(body)?;
+        parse_anthropic_stream(reader, on_delta, on_tool_call, cancel)
     }
 
     /// Convert internal ChatMessages to Anthropic JSON format.
-    fn build_anthropic_messages(messages: &[ChatMessage]) -> Vec<Value> {
-        let mut out: Vec<Value> = Vec::new();
-        let mut pending_tool_results: Vec<Value> = Vec::new();
-
-        fn flush_tool_results(out: &mut Vec<Value>, pending: &mut Vec<Value>) {
-            if !pending.is_empty() {
-                out.push(json!({"role": "user", "content": std::mem::take(pending)}));
-            }
-        }
-
-        for m in messages {
-            // Any non-tool message ends a run of tool results.
-            if m.role != "tool" {
-                flush_tool_results(&mut out, &mut pending_tool_results);
-            }
-
-            match m.role.as_str() {
-                "tool" => {
-                    pending_tool_results.push(json!({
-                        "type": "tool_result",
-                        "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
-                        "content": m.content,
-                    }));
-                }
-                "assistant" => {
-                    if let Some(tcs) = &m.tool_calls {
-                        let mut blocks: Vec<Value> = Vec::new();
-                        if !m.content.is_empty() {
-                            blocks.push(json!({"type": "text", "text": m.content}));
-                        }
-                        for tc in tcs {
-                            blocks.push(json!({
-                                "type": "tool_use",
-                                "id": tc.id,
-                                "name": tc.name,
-                                "input": tc.input,
-                            }));
-                        }
-                        out.push(json!({"role": "assistant", "content": blocks}));
-                    } else if !m.content.is_empty() {
-                        out.push(if let Some(ref blocks) = m.content_blocks {
-                            json!({"role": "assistant", "content": serde_json::to_value(blocks).unwrap_or_default()})
-                        } else {
-                            json!({"role": "assistant", "content": m.content})
-                        });
-                    }
-                }
-                _ => {
-                    // user / system (embedded as user) / developer
-                    if let Some(ref blocks) = m.content_blocks {
-                        // Multi-block user message (e.g. text + image)
-                        let content: Vec<Value> = blocks
-                            .iter()
-                            .map(|b| serde_json::to_value(b).unwrap_or_default())
-                            .collect();
-                        out.push(json!({"role": "user", "content": content}));
-                    } else if !m.content.is_empty() {
-                        out.push(json!({"role": "user", "content": m.content}));
-                    }
-                }
-            }
-        }
-
-        // Flush trailing tool results.
-        flush_tool_results(&mut out, &mut pending_tool_results);
-
-        out
-    }
-
-    fn assemble_message_response(&self, raw: &Value) -> LlmResponse {
-        let mut text = String::new();
-        let mut tool_calls: Vec<SimplifiedToolCall> = Vec::new();
-        let mut reasoning: Option<String> = None;
-        let stop_reason = raw
-            .get("stop_reason")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        if let Some(content) = raw.get("content").and_then(|v| v.as_array()) {
-            for block in content {
-                let btype = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                match btype {
-                    "text" => {
-                        if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
-                            text.push_str(t);
-                        }
-                    }
-                    "thinking" => {
-                        if let Some(t) = block.get("thinking").and_then(|v| v.as_str()) {
-                            reasoning = Some(t.to_string());
-                        }
-                    }
-                    "tool_use" => {
-                        let id = block
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let name = block
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let input = block
-                            .get("input")
-                            .cloned()
-                            .unwrap_or(json!({}));
-                        let args = serde_json::to_string(&input).unwrap_or_default();
-                        tool_calls.push(SimplifiedToolCall {
-                            id,
-                            name,
-                            arguments: args,
-                        });
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        let usage = raw.get("usage").map(|u| {
-            serde_json::from_value(u.clone()).unwrap_or_default()
-        });
-
-        LlmResponse {
-            text,
-            tool_calls,
-            reasoning_content: reasoning,
-            finish_reason: stop_reason,
-            usage,
-        }
+    pub fn build_anthropic_messages(messages: &[ChatMessage]) -> Vec<Value> {
+        crate::api_common::build_anthropic_messages(messages)
     }
 }
 
@@ -276,6 +263,7 @@ pub fn parse_anthropic_stream<R: Read>(
     let mut text = String::new();
     let mut reasoning = String::new();
     let mut stop_reason: Option<String> = None;
+    let mut usage: Option<Usage> = None;
     let mut valid_chunks: usize = 0;
     let mut total_payloads: usize = 0;
 
@@ -305,7 +293,18 @@ pub fn parse_anthropic_stream<R: Read>(
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| ev.to_string());
-                return Err(AnthropicError::Api(format!("stream error: {msg}")));
+                return Err(AnthropicError::stream_error(format!("stream error: {msg}")));
+            }
+            "message_start" => {
+                // The `message_start` event carries input usage up front;
+                // `message_delta` later carries the full cumulative usage.
+                if let Some(u) = ev
+                    .get("message")
+                    .and_then(|m| m.get("usage"))
+                    .and_then(|u| serde_json::from_value(u.clone()).ok())
+                {
+                    usage = Some(u);
+                }
             }
             "content_block_start" => {
                 let idx = ev.get("index").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -324,6 +323,12 @@ pub fn parse_anthropic_stream<R: Read>(
                         .to_string();
                     acc.name = b
                         .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    // redacted_thinking blocks arrive fully-formed here.
+                    acc.data = b
+                        .get("data")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
@@ -347,8 +352,16 @@ pub fn parse_anthropic_stream<R: Read>(
                         "thinking_delta" => {
                             if let Some(t) = d.get("thinking").and_then(|v| v.as_str()) {
                                 reasoning.push_str(t);
-                                acc.text.push_str(t);
+                                acc.thinking.push_str(t);
                                 on_delta(t);
+                            }
+                        }
+                        // Closes a thinking block; the signature must be
+                        // kept so the block can be passed back in the next
+                        // turn of a multi-turn conversation.
+                        "signature_delta" => {
+                            if let Some(sig) = d.get("signature").and_then(|v| v.as_str()) {
+                                acc.signature = sig.to_string();
                             }
                         }
                         "input_json_delta" => {
@@ -368,14 +381,21 @@ pub fn parse_anthropic_stream<R: Read>(
                 {
                     stop_reason = Some(sr.to_string());
                 }
+                // Full cumulative token usage arrives with message_delta.
+                if let Some(u) = ev
+                    .get("usage")
+                    .and_then(|u| serde_json::from_value(u.clone()).ok())
+                {
+                    usage = Some(u);
+                }
             }
             _ => {}
         }
     }
 
     if total_payloads > 0 && valid_chunks == 0 {
-        return Err(AnthropicError::Api(
-            "stream returned no parseable data (all chunks malformed)".into(),
+        return Err(AnthropicError::stream_error(
+            "stream returned no parseable data (all chunks malformed)",
         ));
     }
 
@@ -386,28 +406,58 @@ pub fn parse_anthropic_stream<R: Read>(
         stop_reason = Some("connection_closed".to_string());
     }
 
-    // Assemble tool calls.
+    // Assemble tool calls and ordered content blocks (in stream index order).
     let mut tool_calls = Vec::new();
+    let mut content_blocks: Vec<ContentBlock> = Vec::new();
     for (i, (_, acc)) in blocks.into_iter().enumerate() {
-        if acc.kind != "tool_use" || acc.name.is_empty() {
-            continue;
+        match acc.kind.as_str() {
+            "text" => {
+                if !acc.text.is_empty() {
+                    content_blocks.push(ContentBlock::Text {
+                        text: acc.text,
+                        citations: None,
+                    });
+                }
+            }
+            "thinking" => {
+                if !acc.thinking.is_empty() {
+                    content_blocks.push(ContentBlock::Thinking {
+                        thinking: acc.thinking,
+                        signature: acc.signature,
+                    });
+                }
+            }
+            "redacted_thinking" => {
+                content_blocks.push(ContentBlock::RedactedThinking { data: acc.data });
+            }
+            "tool_use" => {
+                if acc.name.is_empty() {
+                    continue;
+                }
+                let args = if acc.partial_json.trim().is_empty() {
+                    "{}".to_string()
+                } else {
+                    acc.partial_json
+                };
+                let id = if acc.id.is_empty() {
+                    format!("call_{i}")
+                } else {
+                    acc.id
+                };
+                on_tool_call(&acc.name, &args);
+                tool_calls.push(SimplifiedToolCall {
+                    id: id.clone(),
+                    name: acc.name.clone(),
+                    arguments: args.clone(),
+                });
+                content_blocks.push(ContentBlock::ToolUse {
+                    id,
+                    name: acc.name,
+                    input: serde_json::from_str(&args).unwrap_or_else(|_| json!({})),
+                });
+            }
+            _ => {}
         }
-        let args = if acc.partial_json.trim().is_empty() {
-            "{}".to_string()
-        } else {
-            acc.partial_json
-        };
-        let id = if acc.id.is_empty() {
-            format!("call_{i}")
-        } else {
-            acc.id
-        };
-        on_tool_call(&acc.name, &args);
-        tool_calls.push(SimplifiedToolCall {
-            id,
-            name: acc.name,
-            arguments: args,
-        });
     }
 
     if matches!(stop_reason.as_deref(), Some("max_tokens")) {
@@ -425,7 +475,8 @@ pub fn parse_anthropic_stream<R: Read>(
             Some(reasoning)
         },
         finish_reason: stop_reason,
-        usage: None,
+        usage,
+        content_blocks,
     })
 }
 
@@ -521,6 +572,123 @@ mod tests {
     }
 
     #[test]
+    fn stream_parses_signature_delta_and_builds_ordered_blocks() {
+        let raw = concat!(
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Let me think\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_abc\"}}\n\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"answer\"}}\n\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let cancel = AtomicBool::new(false);
+        let resp = parse_anthropic_stream(
+            Cursor::new(raw.as_bytes().to_vec()),
+            |_| {},
+            |_, _| {},
+            &cancel,
+        )
+        .unwrap();
+        // reasoning accumulated, text clean
+        assert_eq!(resp.reasoning_content.as_deref(), Some("Let me think"));
+        assert_eq!(resp.text, "answer");
+        // ordered content blocks: thinking (with signature) then text
+        assert_eq!(resp.content_blocks.len(), 2);
+        match &resp.content_blocks[0] {
+            ContentBlock::Thinking { thinking, signature } => {
+                assert_eq!(thinking, "Let me think");
+                assert_eq!(signature, "sig_abc");
+            }
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+        match &resp.content_blocks[1] {
+            ContentBlock::Text { text, .. } => assert_eq!(text, "answer"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        // usage captured from message_delta
+        let u = resp.usage.unwrap();
+        assert_eq!(u.input_tokens, 10);
+        assert_eq!(u.output_tokens, 5);
+    }
+
+    #[test]
+    fn stream_parses_redacted_thinking_block() {
+        let raw = concat!(
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"encrypted==\"}}\n\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let cancel = AtomicBool::new(false);
+        let resp = parse_anthropic_stream(
+            Cursor::new(raw.as_bytes().to_vec()),
+            |_| {},
+            |_, _| {},
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(resp.content_blocks.len(), 1);
+        match &resp.content_blocks[0] {
+            ContentBlock::RedactedThinking { data } => assert_eq!(data, "encrypted=="),
+            other => panic!("expected RedactedThinking, got {other:?}"),
+        }
+        assert!(resp.reasoning_content.is_none());
+    }
+
+    #[test]
+    fn stream_roundtrips_thinking_block_via_build_messages() {
+        // A thinking block captured from a stream (with signature) must
+        // serialize back into the assistant message for the next turn.
+        let blocks = vec![
+            ContentBlock::Thinking {
+                thinking: "Let me think".into(),
+                signature: "sig_abc".into(),
+            },
+            ContentBlock::ToolUse {
+                id: "t1".into(),
+                name: "run".into(),
+                input: json!({"cmd": "ls"}),
+            },
+        ];
+        let mut msg = ChatMessage::assistant("");
+        msg.content_blocks = Some(blocks);
+        let out = AnthropicClient::build_anthropic_messages(&[msg]);
+        let content = out[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[0]["signature"], "sig_abc");
+        assert_eq!(content[1]["type"], "tool_use");
+    }
+
+    #[test]
+    fn thinking_delta_not_leaked_into_text_blocks() {
+        let raw = concat!(
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"reason\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_x\"}}\n\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let cancel = AtomicBool::new(false);
+        let resp = parse_anthropic_stream(
+            Cursor::new(raw.as_bytes().to_vec()),
+            |_| {},
+            |_, _| {},
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(resp.text, "");
+        assert_eq!(resp.reasoning_content.as_deref(), Some("reason"));
+        // The thinking content must NOT appear in any Text block.
+        match &resp.content_blocks[0] {
+            ContentBlock::Thinking { thinking, .. } => assert_eq!(thinking, "reason"),
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn stream_max_tokens_warning() {
         let raw = concat!(
             "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n",
@@ -592,5 +760,30 @@ mod tests {
             &cancel,
         );
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn typed_event_stream_yields_events() {
+        let raw = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"c\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let mut it = StreamEventStream::new(Cursor::new(raw.as_bytes().to_vec()));
+        let e1 = it.next().unwrap().unwrap();
+        assert_eq!(e1.event_type, "message_start");
+        let e2 = it.next().unwrap().unwrap();
+        assert_eq!(e2.delta.as_ref().unwrap().text.as_deref(), Some("hi"));
+        let e3 = it.next().unwrap().unwrap();
+        assert_eq!(e3.event_type, "message_stop");
+        assert!(it.next().is_none());
+    }
+
+    #[test]
+    fn typed_event_stream_propagates_parse_error() {
+        let raw = "data: {not json\n\ndata: [DONE]\n\n";
+        let mut it = StreamEventStream::new(Cursor::new(raw.as_bytes().to_vec()));
+        assert!(it.next().unwrap().is_err());
     }
 }

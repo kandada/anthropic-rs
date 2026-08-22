@@ -7,7 +7,7 @@
 //! error handling, content blocks, and client configuration.
 
 use serde_json::json;
-use anthropic_rs::*;
+use anthropic_client_rs::*;
 
 // ── Types: serialization roundtrips ────────────────────────────────────────
 
@@ -220,7 +220,7 @@ fn test_sse_parse_text_and_thinking() {
         "data: [DONE]\n\n"
     );
     let cancel = AtomicBool::new(false);
-    let resp = anthropic_rs::parse_anthropic_stream(
+    let resp = anthropic_client_rs::parse_anthropic_stream(
         Cursor::new(raw.as_bytes().to_vec()),
         |_| {}, |_, _| {}, &cancel,
     ).unwrap();
@@ -242,7 +242,7 @@ fn test_sse_parse_tool_use() {
     );
     let cancel = AtomicBool::new(false);
     let mut tools = Vec::new();
-    let resp = anthropic_rs::parse_anthropic_stream(
+    let resp = anthropic_client_rs::parse_anthropic_stream(
         Cursor::new(raw.as_bytes().to_vec()),
         |_| {},
         |n, a| tools.push((n.to_string(), a.to_string())),
@@ -266,7 +266,7 @@ fn test_sse_parse_max_tokens_warning() {
         "data: [DONE]\n\n"
     );
     let cancel = AtomicBool::new(false);
-    let resp = anthropic_rs::parse_anthropic_stream(
+    let resp = anthropic_client_rs::parse_anthropic_stream(
         Cursor::new(raw.as_bytes().to_vec()),
         |_| {}, |_, _| {}, &cancel,
     ).unwrap();
@@ -284,7 +284,7 @@ fn test_sse_parse_no_stop_reason_gets_connection_closed() {
         "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"content\"}}\n\n"
     );
     let cancel = AtomicBool::new(false);
-    let resp = anthropic_rs::parse_anthropic_stream(
+    let resp = anthropic_client_rs::parse_anthropic_stream(
         Cursor::new(raw.as_bytes().to_vec()),
         |_| {}, |_, _| {}, &cancel,
     ).unwrap();
@@ -299,7 +299,7 @@ fn test_sse_parse_all_malformed_error() {
 
     let raw = concat!("data: {not json\n\n", "data: [DONE]\n\n");
     let cancel = AtomicBool::new(false);
-    let r = anthropic_rs::parse_anthropic_stream(
+    let r = anthropic_client_rs::parse_anthropic_stream(
         Cursor::new(raw.as_bytes().to_vec()),
         |_| {}, |_, _| {}, &cancel,
     );
@@ -313,13 +313,13 @@ fn test_sse_parse_error_event() {
 
     let raw = "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n";
     let cancel = AtomicBool::new(false);
-    let r = anthropic_rs::parse_anthropic_stream(
+    let r = anthropic_client_rs::parse_anthropic_stream(
         Cursor::new(raw.as_bytes().to_vec()),
         |_| {}, |_, _| {}, &cancel,
     );
     assert!(r.is_err());
-    if let Err(AnthropicError::Api(msg)) = r {
-        assert!(msg.contains("Overloaded"));
+    if let Err(AnthropicError::Api(e)) = r {
+        assert!(e.message.contains("Overloaded"));
     } else {
         panic!("expected Api error");
     }
@@ -329,7 +329,7 @@ fn test_sse_parse_error_event() {
 
 #[test]
 fn test_build_anthropic_messages_coalesces_tool_results() {
-    use anthropic_rs::api_common::build_anthropic_messages;
+    use anthropic_client_rs::api_common::build_anthropic_messages;
 
     let msgs = vec![
         ChatMessage::user("do things"),
@@ -364,7 +364,7 @@ fn test_build_anthropic_messages_coalesces_tool_results() {
 
 #[test]
 fn test_build_anthropic_messages_content_blocks() {
-    use anthropic_rs::api_common::build_anthropic_messages;
+    use anthropic_client_rs::api_common::build_anthropic_messages;
 
     let msgs = vec![ChatMessage::user_with_blocks(vec![
         ContentBlock::Text { text: "Look at this".into(), citations: None },
@@ -389,9 +389,9 @@ fn test_build_anthropic_messages_content_blocks() {
 #[test]
 fn test_error_retryable() {
     assert!(AnthropicError::Network("timeout".into()).is_retryable());
-    assert!(AnthropicError::Api("HTTP 503 Service Unavailable".into()).is_retryable());
-    assert!(AnthropicError::Api("rate limit exceeded".into()).is_retryable());
-    assert!(!AnthropicError::Api("HTTP 401 Unauthorized".into()).is_retryable());
+    assert!(AnthropicError::api(503, None, "Service Unavailable").is_retryable());
+    assert!(AnthropicError::stream_error("rate limit exceeded").is_retryable());
+    assert!(!AnthropicError::api(401, None, "Unauthorized").is_retryable());
     assert!(!AnthropicError::Config("no API key".into()).is_retryable());
 }
 

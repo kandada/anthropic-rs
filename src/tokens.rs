@@ -3,16 +3,23 @@
 
 //! Token counting utility for Anthropic models.
 //!
-//! Uses character-based heuristics for approximate token counts.
-//! For production use, consider an Anthropic-compatible tokenizer.
+//! Provides approximate token counts using a character-based heuristic
+//! (≈4 chars/token for English, ≈2 chars/token for CJK). This is a
+//! **fallback for rough context budgeting only**.
+//!
+//! For accurate counts use the server-computed [`AnthropicClient::count_tokens`]
+//! (`messages/count_tokens`), the same approach the official Anthropic SDK
+//! relies on. Provider chat-template overhead (DeepSeek ≈ 70, MiniMax ≈ 160)
+//! is not modelled here; measure with the `token_calibration` example.
 
 use crate::types::{ChatMessage, ContentBlock};
 
-fn count_tokens(text: &str) -> u64 {
+/// Approximate token count for a string (fallback heuristic).
+pub fn count_tokens(text: &str) -> u64 {
     if text.is_empty() { return 0; }
     let mut tokens = 0;
     for ch in text.chars() {
-        tokens += if ch.is_ascii() { 1 } else { 3 };
+        tokens += if ch.is_ascii() { 1 } else { 2 };
     }
     ((tokens as f64) / 4.0).ceil() as u64
 }
@@ -51,9 +58,22 @@ pub fn count_message_tokens(msg: &ChatMessage) -> u64 {
     total
 }
 
+/// Approximate per-request chat-template overhead, provider-specific and
+/// NOT modelled by [`count_messages_tokens`] (which uses 0).
+/// Measured with the `token_calibration` example: DeepSeek ≈ 70,
+/// MiniMax ≈ 150. Add it when budgeting against a known provider's
+/// server-computed count.
+pub const PROMPT_OVERHEAD: u64 = 0;
+
 /// Approximate total token count for a list of messages.
 pub fn count_messages_tokens(messages: &[ChatMessage]) -> u64 {
-    let mut total = 0;
+    count_messages_tokens_with_overhead(messages, 0)
+}
+
+/// Like [`count_messages_tokens`] but adds a provider-specific chat-template
+/// overhead (see [`PROMPT_OVERHEAD`]).
+pub fn count_messages_tokens_with_overhead(messages: &[ChatMessage], overhead: u64) -> u64 {
+    let mut total = overhead;
     for msg in messages {
         total += count_message_tokens(msg) + 1;
     }

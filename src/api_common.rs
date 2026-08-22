@@ -7,7 +7,8 @@
 
 use serde_json::{json, Value};
 
-use crate::types::{ChatMessage, LlmResponse, SimplifiedToolCall, Tool};
+use crate::request::ThinkingConfig;
+use crate::types::{ChatMessage, ContentBlock, LlmResponse, SimplifiedToolCall, Tool};
 
 /// Build the request body for an Anthropic message.
 pub fn build_message_body(
@@ -17,6 +18,7 @@ pub fn build_message_body(
     tools: Option<&[Tool]>,
     max_tokens: u64,
     stream: bool,
+    thinking: Option<&ThinkingConfig>,
 ) -> Value {
     let msgs = build_anthropic_messages(messages);
     let mut body = json!({
@@ -24,6 +26,38 @@ pub fn build_message_body(
         "max_tokens": max_tokens,
         "messages": msgs,
         "stream": stream,
+    });
+    if let Some(sys) = system {
+        if !sys.is_empty() {
+            body["system"] = Value::String(sys.to_string());
+        }
+    }
+    if let Some(tools) = tools {
+        if !tools.is_empty() {
+            let arr: Vec<Value> = tools
+                .iter()
+                .map(|t| serde_json::to_value(t).unwrap_or_default())
+                .collect();
+            body["tools"] = Value::Array(arr);
+        }
+    }
+    if let Some(thinking) = thinking {
+        body["thinking"] = serde_json::to_value(thinking).unwrap_or_default();
+    }
+    body
+}
+
+/// Build the request body for the `messages/count_tokens` endpoint.
+pub fn build_count_tokens_body(
+    model: &str,
+    messages: &[ChatMessage],
+    system: Option<&str>,
+    tools: Option<&[Tool]>,
+) -> Value {
+    let msgs = build_anthropic_messages(messages);
+    let mut body = json!({
+        "model": model,
+        "messages": msgs,
     });
     if let Some(sys) = system {
         if !sys.is_empty() {
@@ -66,11 +100,20 @@ pub fn build_anthropic_messages(messages: &[ChatMessage]) -> Vec<Value> {
                 }));
             }
             "assistant" => {
-                if let Some(tcs) = &m.tool_calls {
-                    let mut blocks: Vec<Value> = Vec::new();
-                    if !m.content.is_empty() {
-                        blocks.push(json!({"type": "text", "text": m.content}));
+                // Prefer explicit content blocks (text / thinking /
+                // redacted_thinking) so a multi-turn conversation can pass
+                // thinking blocks (with signatures) back, as Anthropic
+                // requires for extended thinking + tool use. Fall back to
+                // the plain-text `content` field otherwise.
+                let mut blocks: Vec<Value> = Vec::new();
+                if let Some(ref cbs) = m.content_blocks {
+                    for cb in cbs {
+                        blocks.push(serde_json::to_value(cb).unwrap_or_default());
                     }
+                } else if !m.content.is_empty() {
+                    blocks.push(json!({"type": "text", "text": m.content}));
+                }
+                if let Some(tcs) = &m.tool_calls {
                     for tc in tcs {
                         blocks.push(json!({
                             "type": "tool_use",
@@ -79,13 +122,9 @@ pub fn build_anthropic_messages(messages: &[ChatMessage]) -> Vec<Value> {
                             "input": tc.input,
                         }));
                     }
+                }
+                if !blocks.is_empty() {
                     out.push(json!({"role": "assistant", "content": blocks}));
-                } else if !m.content.is_empty() {
-                    out.push(if let Some(ref blocks) = m.content_blocks {
-                        json!({"role": "assistant", "content": serde_json::to_value(blocks).unwrap_or_default()})
-                    } else {
-                        json!({"role": "assistant", "content": m.content})
-                    });
                 }
             }
             _ => {
@@ -110,6 +149,7 @@ pub fn assemble_message_response(raw: &Value) -> LlmResponse {
     let mut text = String::new();
     let mut tool_calls: Vec<SimplifiedToolCall> = Vec::new();
     let mut reasoning: Option<String> = None;
+    let mut content_blocks: Vec<ContentBlock> = Vec::new();
     let stop_reason = raw
         .get("stop_reason")
         .and_then(|v| v.as_str())
@@ -121,19 +161,45 @@ pub fn assemble_message_response(raw: &Value) -> LlmResponse {
                 "text" => {
                     if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
                         text.push_str(t);
+                        content_blocks.push(ContentBlock::Text {
+                            text: t.to_string(),
+                            citations: block
+                                .get("citations")
+                                .cloned()
+                                .and_then(|c| serde_json::from_value(c).ok()),
+                        });
                     }
                 }
                 "thinking" => {
                     if let Some(t) = block.get("thinking").and_then(|v| v.as_str()) {
                         reasoning = Some(t.to_string());
+                        content_blocks.push(ContentBlock::Thinking {
+                            thinking: t.to_string(),
+                            signature: block
+                                .get("signature")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        });
                     }
+                }
+                "redacted_thinking" => {
+                    // Opaque encrypted data; surface it so multi-turn
+                    // conversations can pass it back unchanged.
+                    let data = block
+                        .get("data")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    content_blocks.push(ContentBlock::RedactedThinking { data });
                 }
                 "tool_use" => {
                     let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let input = block.get("input").cloned().unwrap_or(json!({}));
                     let args = serde_json::to_string(&input).unwrap_or_default();
-                    tool_calls.push(SimplifiedToolCall { id, name, arguments: args });
+                    tool_calls.push(SimplifiedToolCall { id: id.clone(), name: name.clone(), arguments: args });
+                    content_blocks.push(ContentBlock::ToolUse { id, name, input });
                 }
                 _ => {}
             }
@@ -146,5 +212,6 @@ pub fn assemble_message_response(raw: &Value) -> LlmResponse {
         reasoning_content: reasoning,
         finish_reason: stop_reason,
         usage,
+        content_blocks,
     }
 }

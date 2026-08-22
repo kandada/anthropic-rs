@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use crate::error::{AnthropicError, Result};
+use crate::retry::RetryConfig;
 
 /// Connect timeout: fail fast on dead links.
 const CONNECT_TIMEOUT_SECS: u64 = 10;
@@ -11,13 +12,16 @@ const CONNECT_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_READ_TIMEOUT_SECS: u64 = 30;
 const WRITE_TIMEOUT_SECS: u64 = 30;
 
-fn build_agent(read_timeout_secs: u64, total_timeout_secs: u64) -> ureq::Agent {
-    ureq::builder()
+fn build_agent(read_timeout_secs: u64, total_timeout_secs: u64, proxy: Option<&str>) -> ureq::Agent {
+    let mut b = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(CONNECT_TIMEOUT_SECS))
         .timeout_read(Duration::from_secs(read_timeout_secs))
         .timeout_write(Duration::from_secs(WRITE_TIMEOUT_SECS))
-        .timeout(Duration::from_secs(total_timeout_secs))
-        .build()
+        .timeout(Duration::from_secs(total_timeout_secs));
+    if let Some(p) = proxy {
+        b = b.proxy(ureq::Proxy::new(p).expect("invalid proxy URL"));
+    }
+    b.build()
 }
 
 /// An Anthropic-compatible API client.
@@ -33,6 +37,10 @@ pub struct AnthropicClient {
     api_version: String,
     /// Default max_tokens.
     default_max_tokens: u64,
+    /// Automatic retry configuration (on by default).
+    retry_config: RetryConfig,
+    /// HTTP proxy URL (e.g. `http://localhost:8080`).
+    proxy: Option<String>,
 }
 
 impl AnthropicClient {
@@ -44,9 +52,11 @@ impl AnthropicClient {
             api_key,
             model: model.into(),
             base_url,
-            agent: build_agent(DEFAULT_READ_TIMEOUT_SECS, 300),
+            agent: build_agent(DEFAULT_READ_TIMEOUT_SECS, 300, None),
             api_version: "2023-06-01".into(),
             default_max_tokens: 4096,
+            retry_config: RetryConfig::default(),
+            proxy: None,
         }
     }
 
@@ -60,10 +70,19 @@ impl AnthropicClient {
             api_key: api_key.into(),
             model: model.into(),
             base_url: base_url.into(),
-            agent: build_agent(DEFAULT_READ_TIMEOUT_SECS, 300),
+            agent: build_agent(DEFAULT_READ_TIMEOUT_SECS, 300, None),
             api_version: "2023-06-01".into(),
             default_max_tokens: 4096,
+            retry_config: RetryConfig::default(),
+            proxy: None,
         }
+    }
+
+    /// Route requests through an HTTP proxy.
+    pub fn with_proxy(mut self, proxy: impl Into<String>) -> Self {
+        self.proxy = Some(proxy.into());
+        self.agent = build_agent(DEFAULT_READ_TIMEOUT_SECS, 300, self.proxy.as_deref());
+        self
     }
 
     /// Set the Anthropic API version.
@@ -78,17 +97,29 @@ impl AnthropicClient {
         self
     }
 
+    /// Set the maximum number of automatic retries (0 disables retry).
+    pub fn with_retries(mut self, max_retries: u32) -> Self {
+        self.retry_config.max_retries = max_retries;
+        self
+    }
+
+    /// Set a full retry configuration.
+    pub fn with_retry_config(mut self, config: RetryConfig) -> Self {
+        self.retry_config = config;
+        self
+    }
+
     /// Override the read timeout (seconds).
     pub fn with_read_timeout(mut self, secs: u64) -> Self {
         let total = 300;
-        self.agent = build_agent(secs, total);
+        self.agent = build_agent(secs, total, self.proxy.as_deref());
         self
     }
 
     /// Override the total request timeout (seconds).
     pub fn with_total_timeout(mut self, secs: u64) -> Self {
         let read = DEFAULT_READ_TIMEOUT_SECS;
-        self.agent = build_agent(read, secs);
+        self.agent = build_agent(read, secs, self.proxy.as_deref());
         self
     }
 
@@ -134,27 +165,57 @@ impl AnthropicClient {
     }
 
     pub fn post_json(&self, body: serde_json::Value) -> Result<ureq::Response> {
+        retry_response(&self.retry_config, || self.post_json_once(&body))
+    }
+
+    fn post_json_once(&self, body: &serde_json::Value) -> Result<ureq::Response> {
         match self
             .agent
             .post(&self.endpoint())
             .set("x-api-key", self.api_key())
             .set("anthropic-version", self.api_version())
             .set("Content-Type", "application/json")
-            .send_json(body)
+            .send_json(body.clone())
         {
             Ok(r) => Ok(r),
             Err(ureq::Error::Status(code, r)) => {
+                let retry_after = parse_retry_after(&r);
                 let msg = r.into_string().unwrap_or_default();
-                Err(AnthropicError::Api(format!(
-                    "HTTP {code}: {}",
-                    truncate(&msg, 500)
-                )))
+                Err(AnthropicError::api(code, retry_after, truncate(&msg, 500)))
             }
             Err(e) => Err(AnthropicError::Network(e.to_string())),
         }
     }
 
+    /// POST to an arbitrary path under the base URL (e.g.
+    /// `v1/messages/count_tokens`), with the same retry/error handling.
+    pub(crate) fn post_json_path(&self, path: &str, body: serde_json::Value) -> Result<ureq::Response> {
+        let url = format!("{}/{}", self.base_url.trim_end_matches('/'), path.trim_start_matches('/'));
+        retry_response(&self.retry_config, || {
+            match self
+                .agent
+                .post(&url)
+                .set("x-api-key", self.api_key())
+                .set("anthropic-version", self.api_version())
+                .set("Content-Type", "application/json")
+                .send_json(body.clone())
+            {
+                Ok(r) => Ok(r),
+                Err(ureq::Error::Status(code, r)) => {
+                    let retry_after = parse_retry_after(&r);
+                    let msg = r.into_string().unwrap_or_default();
+                    Err(AnthropicError::api(code, retry_after, truncate(&msg, 500)))
+                }
+                Err(e) => Err(AnthropicError::Network(e.to_string())),
+            }
+        })
+    }
+
     pub(crate) fn post_stream(&self, body: serde_json::Value) -> Result<impl std::io::Read> {
+        retry_response(&self.retry_config, || self.post_stream_once(&body)).map(|r| r.into_reader())
+    }
+
+    fn post_stream_once(&self, body: &serde_json::Value) -> Result<ureq::Response> {
         match self
             .agent
             .post(&self.endpoint())
@@ -162,19 +223,46 @@ impl AnthropicClient {
             .set("anthropic-version", self.api_version())
             .set("Content-Type", "application/json")
             .set("Accept", "text/event-stream")
-            .send_json(body)
+            .send_json(body.clone())
         {
-            Ok(r) => Ok(r.into_reader()),
+            Ok(r) => Ok(r),
             Err(ureq::Error::Status(code, r)) => {
+                let retry_after = parse_retry_after(&r);
                 let msg = r.into_string().unwrap_or_default();
-                Err(AnthropicError::Api(format!(
-                    "HTTP {code}: {}",
-                    truncate(&msg, 500)
-                )))
+                Err(AnthropicError::api(code, retry_after, truncate(&msg, 500)))
             }
             Err(e) => Err(AnthropicError::Network(e.to_string())),
         }
     }
+}
+
+/// Run a single-shot HTTP closure with the retry policy.
+fn retry_response<F>(config: &RetryConfig, mut once: F) -> Result<ureq::Response>
+where
+    F: FnMut() -> Result<ureq::Response>,
+{
+    let mut attempt = 0u32;
+    loop {
+        match once() {
+            Ok(r) => return Ok(r),
+            Err(e) => {
+                if attempt >= config.max_retries || !e.is_retryable() {
+                    return Err(e);
+                }
+                let delay = match e.retry_after_secs() {
+                    Some(secs) => Duration::from_secs(secs),
+                    None => Duration::from_millis(config.delay_ms(attempt)),
+                };
+                attempt += 1;
+                std::thread::sleep(delay);
+            }
+        }
+    }
+}
+
+fn parse_retry_after(r: &ureq::Response) -> Option<u64> {
+    r.header("Retry-After")
+        .and_then(|v| v.trim().parse::<u64>().ok())
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -214,5 +302,20 @@ mod tests {
         let _client = AnthropicClient::new("sk-ant-test", "test")
             .with_read_timeout(60)
             .with_total_timeout(600);
+    }
+
+    #[test]
+    fn client_retry_config_default_on() {
+        let client = AnthropicClient::new("sk-ant-test", "test");
+        assert_eq!(client.retry_config.max_retries, 3);
+        let disabled = client.with_retries(0);
+        assert_eq!(disabled.retry_config.max_retries, 0);
+    }
+
+    #[test]
+    fn client_proxy_accepted() {
+        let client = AnthropicClient::new("sk-ant-test", "test")
+            .with_proxy("http://127.0.0.1:8080");
+        assert_eq!(client.proxy.as_deref(), Some("http://127.0.0.1:8080"));
     }
 }

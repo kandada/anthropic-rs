@@ -29,16 +29,70 @@ pub struct MessageRequest {
 }
 
 /// Configuration for extended thinking.
+///
+/// Mirrors the official Anthropic SDK's `ThinkingConfigParam`, which is a
+/// union of `enabled`, `disabled`, and `adaptive`:
+/// - `enabled` requires `budget_tokens` (Claude 4.5 and earlier)
+/// - `adaptive` needs no budget (Claude 4.6+, recommended going forward)
+/// - `disabled` turns thinking off explicitly
+///
+/// Both `enabled` and `adaptive` accept an optional `display`:
+/// - `summarized` — thinking is returned normally (default)
+/// - `omitted` — thinking content is redacted but a signature is returned
+///   for multi-turn continuity
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct ThinkingConfig {
-    #[serde(rename = "type")]
-    pub thinking_type: String,
-    pub budget_tokens: u64,
+#[serde(tag = "type")]
+pub enum ThinkingConfig {
+    #[serde(rename = "enabled")]
+    Enabled {
+        budget_tokens: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<ThinkingDisplay>,
+    },
+    #[serde(rename = "disabled")]
+    Disabled,
+    #[serde(rename = "adaptive")]
+    Adaptive {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<ThinkingDisplay>,
+    },
+}
+
+/// How thinking content appears in the response.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingDisplay {
+    /// Thinking content is returned normally.
+    Summarized,
+    /// Thinking content is redacted; a signature is returned for
+    /// multi-turn continuity.
+    Omitted,
 }
 
 impl ThinkingConfig {
+    /// Fixed-budget extended thinking (requires `budget_tokens`).
     pub fn enabled(budget_tokens: u64) -> Self {
-        ThinkingConfig { thinking_type: "enabled".into(), budget_tokens }
+        ThinkingConfig::Enabled { budget_tokens, display: None }
+    }
+
+    /// Explicitly disable extended thinking.
+    pub fn disabled() -> Self {
+        ThinkingConfig::Disabled
+    }
+
+    /// Adaptive extended thinking (no budget needed, Claude 4.6+).
+    pub fn adaptive() -> Self {
+        ThinkingConfig::Adaptive { display: None }
+    }
+
+    /// Attach a `display` mode (`summarized` / `omitted`).
+    pub fn display(mut self, display: ThinkingDisplay) -> Self {
+        match &mut self {
+            ThinkingConfig::Enabled { display: d, .. }
+            | ThinkingConfig::Adaptive { display: d } => *d = Some(display),
+            ThinkingConfig::Disabled => {}
+        }
+        self
     }
 }
 
@@ -185,5 +239,31 @@ mod tests {
             .stream(true)
             .build_body();
         assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn test_thinking_adaptive_no_budget() {
+        let body = MessageRequest::new("claude-sonnet-4-20250514", make_messages(), 1024)
+            .thinking(ThinkingConfig::adaptive())
+            .build_body();
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert!(body["thinking"].get("budget_tokens").is_none());
+    }
+
+    #[test]
+    fn test_thinking_disabled() {
+        let body = MessageRequest::new("claude-sonnet-4-20250514", make_messages(), 1024)
+            .thinking(ThinkingConfig::disabled())
+            .build_body();
+        assert_eq!(body["thinking"]["type"], "disabled");
+    }
+
+    #[test]
+    fn test_thinking_display_omitted() {
+        let body = MessageRequest::new("claude-sonnet-4-20250514", make_messages(), 1024)
+            .thinking(ThinkingConfig::adaptive().display(ThinkingDisplay::Omitted))
+            .build_body();
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["thinking"]["display"], "omitted");
     }
 }
