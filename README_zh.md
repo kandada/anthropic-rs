@@ -24,16 +24,6 @@
 - **系统提示** — 顶层 `system` 参数
 - **多提供商** — 根据 API key 自动识别，自定义 base URL
 
-## 安装
-
-```toml
-[dependencies]
-anthropic-client-rs = "0.1"
-
-# 异步支持
-# anthropic-client-rs = { version = "0.1", features = ["async"] }
-```
-
 ## 快速开始
 
 ### 同步

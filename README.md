@@ -24,16 +24,6 @@ A full-featured Rust client for the Anthropic Messages API. Compatible with Clau
 - **System Prompts** — top-level `system` parameter
 - **Multi-Provider** — auto-detects provider by API key, custom base URL
 
-## Installation
-
-```toml
-[dependencies]
-anthropic-client-rs = "0.1"
-
-# With async support
-# anthropic-client-rs = { version = "0.1", features = ["async"] }
-```
-
 ## Quick Start
 
 ### Sync
